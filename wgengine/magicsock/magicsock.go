@@ -492,6 +492,10 @@ func (o *Options) derpActiveFunc() func() {
 // of NewConn. Mostly for tests.
 func newConn(logf logger.Logf) *Conn {
 	discoPrivate := key.NewDisco()
+	speeder, err := NewUDPSpeeder()
+	if err != nil {
+		logf("magicsock: failed to initialize UDPSpeeder: %v", err)
+	}
 	c := &Conn{
 		logf:         logf,
 		derpRecvCh:   make(chan derpReadResult, 1), // must be buffered, see issue 3736
@@ -502,6 +506,7 @@ func newConn(logf logger.Logf) *Conn {
 		discoPrivate: discoPrivate,
 		discoPublic:  discoPrivate.Public(),
 		cloudInfo:    newCloudInfo(logf),
+		speeder:      speeder,
 	}
 	c.discoShort = c.discoPublic.ShortString()
 	c.bind = &connBind{Conn: c, closed: true}
@@ -2540,6 +2545,9 @@ func (c *Conn) Close() error {
 	}
 
 	deregisterMetrics(c.metrics)
+
+	// Clean up speeder
+	c.speeder = nil
 
 	return nil
 }
