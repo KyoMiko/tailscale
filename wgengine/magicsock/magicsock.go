@@ -1456,10 +1456,10 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 	var epCache ippEndpointCache
 
 	return func(buffs [][]byte, sizes []int, eps []conn.Endpoint) (_ int, retErr error) {
-		recoveredBuffs, recoveredSizes, err := c.speeder.HandleReceive(buffs, sizes)
-		if err != nil {
-			return 0, err
+		if len(buffs) == 0 || len(sizes) == 0 || len(eps) == 0 {
+			return 0, nil // 处理空输入的情况
 		}
+
 		if healthItem != nil {
 			healthItem.Enter()
 			defer healthItem.Exit()
@@ -1473,42 +1473,79 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 			panic("nil RebindingUDPConn")
 		}
 
-		batch := c.getReceiveBatchForBuffs(recoveredBuffs)
+		batch := c.getReceiveBatchForBuffs(buffs)
 		defer c.putReceiveBatch(batch)
-		for {
-			numMsgs, err := ruc.ReadBatch(batch.msgs[:len(recoveredBuffs)], 0)
-			if err != nil {
-				if neterror.PacketWasTruncated(err) {
-					continue
-				}
-				return 0, err
-			}
 
-			reportToCaller := false
-			for i, msg := range batch.msgs[:numMsgs] {
-				if msg.N == 0 {
-					recoveredSizes[i] = 0
-					continue
-				}
-				ipp := msg.Addr.(*net.UDPAddr).AddrPort()
-				if ep, ok := c.receiveIP(msg.Buffers[0][:msg.N], ipp, &epCache); ok {
-					if packetMetric != nil {
-						packetMetric.Add(1)
-					}
-					if bytesMetric != nil {
-						bytesMetric.Add(int64(msg.N))
-					}
-					eps[i] = ep
-					recoveredSizes[i] = msg.N
-					reportToCaller = true
-				} else {
-					recoveredSizes[i] = 0
-				}
+		// 处理收到的原始数据包
+		var rawBuffs [][]byte
+		var rawSizes []int
+
+		numMsgs, err := ruc.ReadBatch(batch.msgs[:len(buffs)], 0)
+		if err != nil {
+			if neterror.PacketWasTruncated(err) {
+				return 0, nil
 			}
-			if reportToCaller {
-				return numMsgs, nil
+			return 0, err
+		}
+
+		if numMsgs == 0 {
+			return 0, nil // 没有收到任何消息
+		}
+
+		// 收集有效的原始数据包
+		for i := 0; i < numMsgs; i++ {
+			if batch.msgs[i].N > 0 {
+				rawBuffs = append(rawBuffs, batch.msgs[i].Buffers[0][:batch.msgs[i].N])
+				rawSizes = append(rawSizes, batch.msgs[i].N)
 			}
 		}
+
+		if len(rawBuffs) == 0 {
+			return 0, nil // 没有有效的数据包
+		}
+
+		// 使用 UDPSpeeder 处理数据包
+		recoveredBuffs, recoveredSizes, err := c.speeder.HandleReceive(rawBuffs, rawSizes)
+		if err != nil {
+			c.logf("magicsock: HandleReceive error: %v", err)
+			// 发生错误时使用原始数据包
+			recoveredBuffs = rawBuffs
+			recoveredSizes = rawSizes
+		}
+
+		// 如果没有恢复出数据包,使用原始数据包
+		if len(recoveredBuffs) == 0 {
+			recoveredBuffs = rawBuffs
+			recoveredSizes = rawSizes
+		}
+
+		reportToCaller := false
+		for i := 0; i < len(recoveredBuffs); i++ {
+			if recoveredSizes[i] == 0 {
+				continue
+			}
+
+			ipp := batch.msgs[i].Addr.(*net.UDPAddr).AddrPort()
+			if ep, ok := c.receiveIP(recoveredBuffs[i], ipp, &epCache); ok {
+				if packetMetric != nil {
+					packetMetric.Add(1)
+				}
+				if bytesMetric != nil {
+					bytesMetric.Add(int64(recoveredSizes[i]))
+				}
+
+				if i < len(eps) {
+					eps[i] = ep
+					sizes[i] = recoveredSizes[i]
+					reportToCaller = true
+				}
+			}
+		}
+
+		if reportToCaller {
+			return numMsgs, nil
+		}
+		return 0, nil
 	}
 }
 
