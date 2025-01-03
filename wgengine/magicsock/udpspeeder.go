@@ -155,6 +155,11 @@ func (s *UDPSpeeder) SpeedSend(buffs [][]byte) ([][]byte, error) {
 // []int: 恢复后数据包的大小
 // error: 处理过程中的错误
 func (s *UDPSpeeder) HandleReceive(packets [][]byte, sizes []int) ([][]byte, []int, error) {
+	if len(packets) == 0 || len(sizes) == 0 {
+		// 处理空输入的情况
+		return nil, nil, nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -258,6 +263,11 @@ func (s *UDPSpeeder) HandleReceive(packets [][]byte, sizes []int) ([][]byte, []i
 
 		// 清理已处理的数据
 		delete(s.packetCache, seq)
+	}
+
+	// 如果没有恢复出任何数据包,返回原始数据包
+	if len(resultBuffs) == 0 {
+		return packets, sizes, nil
 	}
 
 	return resultBuffs, resultSizes, nil
