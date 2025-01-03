@@ -34,10 +34,12 @@ type packetGroup struct {
 
 // 包头结构
 const (
-	headerSize    = 12   // 序列号(4字节) + 分片索引(2字节) + 总分片数(2字节) + 校验和(4字节)
+	headerSize    = 16   // 序列号(4字节) + 分片索引(2字节) + 总分片数(2字节) + 校验和(4字节) + 魔术数字(4字节)
 	dataShards    = 20   // 原始数据分片数
 	parityShards  = 10   // 冗余数据分片数
 	maxPacketSize = 1400 // UDP包最大大小(预留头部空间)
+	// 添加魔术数字常量
+	magicNumber = 0x54534653 // "TSFS" in hex
 	// 添加超时相关常量
 	packetTimeout   = 30 * time.Second
 	cleanupInterval = 1 * time.Minute
@@ -131,6 +133,8 @@ func (s *UDPSpeeder) SpeedSend(buffs [][]byte) ([][]byte, error) {
 			binary.BigEndian.PutUint16(packetWithHeader[4:6], uint16(i))
 			binary.BigEndian.PutUint16(packetWithHeader[6:8], uint16(dataShards+parityShards))
 			binary.BigEndian.PutUint32(packetWithHeader[8:12], checksum)
+			// 添加魔术数字
+			binary.BigEndian.PutUint32(packetWithHeader[12:16], magicNumber)
 
 			// 复制分片数据
 			copy(packetWithHeader[headerSize:], shards[i])
@@ -156,8 +160,19 @@ func (s *UDPSpeeder) SpeedSend(buffs [][]byte) ([][]byte, error) {
 // error: 处理过程中的错误
 func (s *UDPSpeeder) HandleReceive(packets [][]byte, sizes []int) ([][]byte, []int, error) {
 	if len(packets) == 0 || len(sizes) == 0 {
-		// 处理空输入的情况
 		return nil, nil, nil
+	}
+
+	// 检查第一个包是否包含魔术数字
+	if sizes[0] < headerSize {
+		// 包太小,不是 UDPSpeeder 的包,返回原始数据
+		return packets, sizes, nil
+	}
+
+	magic := binary.BigEndian.Uint32(packets[0][12:16])
+	if magic != magicNumber {
+		// 不是 UDPSpeeder 的包,返回原始数据
+		return packets, sizes, nil
 	}
 
 	s.mu.Lock()
@@ -199,7 +214,6 @@ func (s *UDPSpeeder) HandleReceive(packets [][]byte, sizes []int) ([][]byte, []i
 		copy(shardData, packet[headerSize:])
 		group.packets[shardIndex] = shardData
 		if shardIndex == 0 {
-			// 只在第一个分片中保存校验和
 			group.checksum = storedChecksum
 		}
 		group.sizes[shardIndex] = sizes[i] - headerSize
@@ -263,11 +277,6 @@ func (s *UDPSpeeder) HandleReceive(packets [][]byte, sizes []int) ([][]byte, []i
 
 		// 清理已处理的数据
 		delete(s.packetCache, seq)
-	}
-
-	// 如果没有恢复出任何数据包,返回原始数据包
-	if len(resultBuffs) == 0 {
-		return packets, sizes, nil
 	}
 
 	return resultBuffs, resultSizes, nil
