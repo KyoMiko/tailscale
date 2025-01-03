@@ -153,6 +153,8 @@ require (
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/jjti/go-spancheck v0.5.3 // indirect
 	github.com/karamaru-alpha/copyloopvar v1.0.8 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
+	github.com/klauspost/reedsolomon v1.12.4 // indirect
 	github.com/macabu/inamedparam v0.1.3 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect

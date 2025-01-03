@@ -377,6 +377,9 @@ type Conn struct {
 
 	// metrics contains the metrics for the magicsock instance.
 	metrics *metrics
+
+	// speeder is the speeder for sending and receiving data
+	speeder *UDPSpeeder
 }
 
 // SetDebugLoggingEnabled controls whether spammy debug logging is enabled.
@@ -1211,7 +1214,11 @@ func (c *Conn) networkDown() bool { return !c.networkUp.Load() }
 //
 // See https://pkg.go.dev/golang.zx2c4.com/wireguard/conn#Bind.Send
 func (c *Conn) Send(buffs [][]byte, ep conn.Endpoint) (err error) {
-	n := int64(len(buffs))
+	speededBuffs, err := c.speeder.SpeedSend(buffs)
+	if err != nil {
+		return err
+	}
+	n := int64(len(speededBuffs))
 	defer func() {
 		if err != nil {
 			c.metrics.outboundPacketsDroppedErrors.Add(n)
@@ -1223,7 +1230,7 @@ func (c *Conn) Send(buffs [][]byte, ep conn.Endpoint) (err error) {
 		return errNetworkDown
 	}
 	if ep, ok := ep.(*endpoint); ok {
-		return ep.send(buffs)
+		return ep.send(speededBuffs)
 	}
 	// If it's not of type *endpoint, it's probably *lazyEndpoint, which means
 	// we don't actually know who the peer is and we're waiting for wireguard-go
@@ -1444,6 +1451,10 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 	var epCache ippEndpointCache
 
 	return func(buffs [][]byte, sizes []int, eps []conn.Endpoint) (_ int, retErr error) {
+		recoveredBuffs, recoveredSizes, err := c.speeder.HandleReceive(buffs, sizes)
+		if err != nil {
+			return 0, err
+		}
 		if healthItem != nil {
 			healthItem.Enter()
 			defer healthItem.Exit()
@@ -1457,10 +1468,10 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 			panic("nil RebindingUDPConn")
 		}
 
-		batch := c.getReceiveBatchForBuffs(buffs)
+		batch := c.getReceiveBatchForBuffs(recoveredBuffs)
 		defer c.putReceiveBatch(batch)
 		for {
-			numMsgs, err := ruc.ReadBatch(batch.msgs[:len(buffs)], 0)
+			numMsgs, err := ruc.ReadBatch(batch.msgs[:len(recoveredBuffs)], 0)
 			if err != nil {
 				if neterror.PacketWasTruncated(err) {
 					continue
@@ -1471,7 +1482,7 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 			reportToCaller := false
 			for i, msg := range batch.msgs[:numMsgs] {
 				if msg.N == 0 {
-					sizes[i] = 0
+					recoveredSizes[i] = 0
 					continue
 				}
 				ipp := msg.Addr.(*net.UDPAddr).AddrPort()
@@ -1483,10 +1494,10 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 						bytesMetric.Add(int64(msg.N))
 					}
 					eps[i] = ep
-					sizes[i] = msg.N
+					recoveredSizes[i] = msg.N
 					reportToCaller = true
 				} else {
-					sizes[i] = 0
+					recoveredSizes[i] = 0
 				}
 			}
 			if reportToCaller {
